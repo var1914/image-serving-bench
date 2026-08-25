@@ -18,12 +18,20 @@ Run:  .venv/bin/python -m uvicorn sut.fastapi_naive.server:app --host 0.0.0.0 --
       (from the payload_workload/ dir so the import path resolves)
 """
 from __future__ import annotations
-import asyncio, io, time
+import asyncio, io, os, time
+from concurrent.futures import ThreadPoolExecutor
 from fastapi import FastAPI, Request, Response
 from PIL import Image
 from prometheus_client import Counter, Gauge, Histogram, generate_latest, CONTENT_TYPE_LATEST
 
 app = FastAPI(title="SUT-A naive image server")
+
+# Bound the decode thread pool so the server behaves as a clean c=N queue matching the
+# pinned core count. Set PW_DECODE_THREADS=<server cores> (e.g. 7) for the convoy
+# experiment; unset falls back to asyncio's default executor (min(32, cpu+4) threads,
+# which on a big host over-subscribes a few pinned cores and muddies the queueing model).
+_DT = os.environ.get("PW_DECODE_THREADS")
+_DECODE_POOL = ThreadPoolExecutor(max_workers=int(_DT), thread_name_prefix="decode") if _DT else None
 
 # ---- metrics -----------------------------------------------------------------
 # Histograms bucket observations so Prometheus can compute quantiles (p50/p99)
@@ -100,5 +108,5 @@ async def predict_offloaded(request: Request):
     """THE FIX: same work in the default thread pool -> loop stays free."""
     body = await request.body()
     loop = asyncio.get_running_loop()
-    stages = await loop.run_in_executor(None, decode_resize, body)
+    stages = await loop.run_in_executor(_DECODE_POOL, decode_resize, body)
     return {"path": "offloaded", **observe(stages)}

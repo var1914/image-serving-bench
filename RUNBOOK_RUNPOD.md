@@ -76,8 +76,9 @@ Assume a pod with >= 9 vCPU (cores 0-8). Adjust core ranges to your pod.
     #   (if pip itself is missing: apt-get update && apt-get install -y python3-pip)
     apt-get update && apt-get install -y util-linux htop      # taskset + htop
 
-    # 2. server pinned to cores 0-6 (7 cores)
-    taskset -c 0-6 python3 -m uvicorn sut.fastapi_naive.server:app \
+    # 2. server pinned to cores 0-6; bound the decode pool to match (clean c=7 queue,
+    #    else the default pool over-subscribes the 7 cores and muddies the theory match)
+    PW_DECODE_THREADS=7 taskset -c 0-6 python3 -m uvicorn sut.fastapi_naive.server:app \
         --host 0.0.0.0 --port 8099 --log-level warning &
     curl -s localhost:8099/healthz       # sanity: -> {"ok":true,...}
 
@@ -106,5 +107,10 @@ Adjust `--rps` until `rho` is ~0.7-0.9 **and** C0 goodput stays ~100%:
 - The footer prints a trustworthiness gate: `rho in band?` and `omission low?`.
   If any row shows high `om_p99` (generator fell behind) or rho is out of band, the
   numbers are not trustworthy — retune `--rps` / raise `--max-conns` and rerun.
+- A `C0_recheck` row re-runs C0 at the very end; the footer `drift check` compares it
+  to the first C0. If it drifted >1.2x, time-drift is confounding the tax (conditions
+  run in fixed order) — rerun. (`--no-recheck` skips this if you must.)
+- If the footer warns about failed/timed-out requests, p99 there understates the tail
+  (timeouts are excluded from p99) — lower `--rps`.
 - Full data in `results/convoy/convoy_results.json`. Pull it back:
       tar czf convoy.tgz results/convoy && <download>

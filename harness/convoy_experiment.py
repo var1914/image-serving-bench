@@ -92,6 +92,27 @@ async def run_condition(client, target, imgs, mps, ws, rps, duration, max_conns,
     return rows
 
 
+async def measure(a, cache, rng, rho, name, dist):
+    """Run one condition end-to-end; print and return its result dict."""
+    mps = [mp for mp, _ in dist]; ws = [w for _, w in dist]
+    imgs = [cache[mp] for mp in mps]
+    mean_mp = sum(w * m for w, m in zip(ws, mps))
+    print(f"\n>>> {name}: mean {mean_mp:.2f} MP, Cs^2={cs2(mps, ws):.2f} | {a.rps:g} rps x {a.duration:g}s")
+    async with httpx.AsyncClient(limits=httpx.Limits(max_connections=a.max_conns + 8)) as client:
+        rows = await run_condition(client, a.target, imgs, mps, ws, a.rps, a.duration, a.max_conns, rng)
+    lat = [r[0] * 1e3 for r in rows if r[2] == 200]
+    om = [r[1] * 1e3 for r in rows]
+    good = sum(1 for x in lat if x <= a.slo_ms) / max(1, len(rows)) * 100
+    res = {"name": name, "n": len(rows), "ok": len(lat), "mean_mp": mean_mp,
+           "cs2": cs2(mps, ws), "mp_per_s": mean_mp * a.rps, "rho": rho,
+           "achieved_rps": len(rows) / a.duration,
+           "p50": pct(lat, 50), "p99": pct(lat, 99), "p999": pct(lat, 99.9),
+           "goodput": good, "omission_p99": pct(om, 99)}
+    print(f"    p99={res['p99']:.0f}ms  goodput={good:.1f}%  ok={len(lat)}/{len(rows)}  "
+          f"achieved={res['achieved_rps']:.0f}/{a.rps:g} rps  om_p99={pct(om, 99):.0f}ms")
+    return res
+
+
 async def main_async(a):
     root = a.target.rsplit("/", 1)[0]
     if not await wait_ready(root):
@@ -111,8 +132,8 @@ async def main_async(a):
     svc_ms = service_ms(3.0)
     rho = a.rps * svc_ms / (a.server_cores * 1000)
     band = "OK" if 0.6 <= rho <= 0.92 else ("TOO LOW - raise --rps" if rho < 0.6 else "TOO HIGH - lower --rps")
-    print(f"operating point: {a.rps:g} rps x {svc_ms:.1f} ms/req / {a.server_cores} cores "
-          f"~= rho {rho:.2f}  [{band}]  (want 0.7-0.9)")
+    print(f"operating point (modeled): {a.rps:g} rps x {svc_ms:.1f} ms/req / {a.server_cores} cores "
+          f"~= rho {rho:.2f}  [{band}]  (want 0.7-0.9; constants are approximate - confirm with htop)")
 
     # --- warmup (discarded) — keeps the cold-start tax out of C0 ----------------
     # Warm at the SAME operating point as the conditions (mean 3 MP), NOT an
@@ -128,26 +149,16 @@ async def main_async(a):
 
     results = []
     for name, dist in CONDITIONS:
-        mps = [mp for mp, _ in dist]; ws = [w for _, w in dist]
-        imgs = [cache[mp] for mp in mps]
-        mean_mp = sum(w * m for w, m in zip(ws, mps))
-        print(f"\n>>> {name}: mean {mean_mp:.2f} MP, Cs^2={cs2(mps, ws):.2f} "
-              f"| {a.rps} rps for {a.duration}s  (watch Grafana now)")
-        async with httpx.AsyncClient(limits=httpx.Limits(max_connections=a.max_conns + 8)) as client:
-            rows = await run_condition(client, a.target, imgs, mps, ws, a.rps, a.duration, a.max_conns, rng)
-        lat = [r[0] * 1e3 for r in rows if r[2] == 200]
-        om  = [r[1] * 1e3 for r in rows]
-        good = sum(1 for x in lat if x <= a.slo_ms) / max(1, len(rows)) * 100
-        achieved_rps = len(rows) / a.duration
-        results.append({"name": name, "n": len(rows), "mean_mp": mean_mp,
-                        "cs2": cs2(mps, ws), "mp_per_s": mean_mp * a.rps, "rho": rho,
-                        "achieved_rps": achieved_rps,
-                        "p50": pct(lat, 50), "p99": pct(lat, 99), "p999": pct(lat, 99.9),
-                        "goodput": good, "omission_p99": pct(om, 99)})
-        print(f"    p99={results[-1]['p99']:.0f}ms  goodput={good:.1f}%  "
-              f"achieved={achieved_rps:.0f}/{a.rps:g} rps  omission_p99={pct(om,99):.0f}ms")
+        results.append(await measure(a, cache, rng, rho, name, dist))
         if a.settle:
             await asyncio.sleep(a.settle)
+
+    # Drift sentinel — fixes the fixed-order confound. Conditions run C0..C3 with
+    # variance rising by position, so any time-drift (memory growth, thermal, further
+    # warming) would look like a variance effect. Re-run C0 last: if its p99 ~= the
+    # first C0, there was no drift and the rising tax is really variance.
+    if not a.no_recheck:
+        results.append(await measure(a, cache, rng, rho, "C0_recheck", CONDITIONS[0][1]))
 
     base = results[0]["p99"]
     kbase = 1 + results[0]["cs2"]
@@ -170,6 +181,17 @@ async def main_async(a):
     print("  OK: omission low across all conditions -> tail numbers are trustworthy."
           if not bad_om else
           f"  WARN: high omission in {bad_om} -> those rows are contaminated; retune and rerun.")
+    fails = [r["name"] for r in results if r.get("ok", r["n"]) < r["n"]]
+    if fails:
+        print(f"  WARN: requests failed/timed out in {fails} -> p99 there EXCLUDES them "
+              f"(tail understated). Lower --rps.")
+    rc = next((r for r in results if r["name"] == "C0_recheck"), None)
+    if rc and base:
+        drift = rc["p99"] / base
+        print(f"  drift check: C0_recheck p99 = {drift:.2f}x of C0 start -> "
+              + ("negligible; the tax reflects variance, not run order."
+                 if drift <= 1.2 else
+                 "SIGNIFICANT; fixed order means some 'tax' may be time-drift. Rerun (shuffle order)."))
     with open(os.path.join(a.out, "convoy_results.json"), "w") as fh:
         json.dump(results, fh, indent=2)
     print(f"\n  saved -> {a.out}/convoy_results.json")
@@ -188,6 +210,8 @@ def main():
                     help="seconds of discarded warmup load before C0 (avoids cold-start bias)")
     ap.add_argument("--server-cores", type=int, default=7,
                     help="cores the server is pinned to (taskset) — used for the rho utilization proxy")
+    ap.add_argument("--no-recheck", action="store_true",
+                    help="skip the C0 re-run at the end (the time-drift sentinel)")
     asyncio.run(main_async(ap.parse_args()))
 
 
