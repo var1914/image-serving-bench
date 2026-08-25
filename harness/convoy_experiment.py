@@ -115,11 +115,15 @@ async def main_async(a):
           f"~= rho {rho:.2f}  [{band}]  (want 0.7-0.9)")
 
     # --- warmup (discarded) — keeps the cold-start tax out of C0 ----------------
+    # Warm at the SAME operating point as the conditions (mean 3 MP), NOT an
+    # equal-weight mix over all sizes: {1,3,5,11,24} averages ~8.8 MP, which at the
+    # target rps is ~2x capacity — the warmup would overload and take minutes to
+    # drain instead of `warmup` seconds. Conditions run in sequence, so the big-image
+    # decode path is warm well before C3 anyway.
     if a.warmup > 0:
-        print(f"warmup: {a.warmup:g}s of discarded load (thread pool / allocator / decode paths)...")
-        warm_imgs = list(cache.values()); warm_mps = list(cache.keys())
+        print(f"warmup: {a.warmup:g}s of discarded load at the operating mix (~3 MP)...")
         async with httpx.AsyncClient(limits=httpx.Limits(max_connections=a.max_conns + 8)) as client:
-            await run_condition(client, a.target, warm_imgs, warm_mps, [1] * len(warm_imgs),
+            await run_condition(client, a.target, [cache[3.0]], [3.0], [1.0],
                                 a.rps, a.warmup, a.max_conns, rng)   # rows discarded
 
     results = []
