@@ -1,0 +1,17 @@
+# Pin exact versions on first successful run; these are the deps, not a lockfile.
+torch
+torchvision
+fastapi
+uvicorn[standard]
+pillow
+# pillow-simd            # install in place of pillow on the pod for the SIMD backend
+opencv-python-headless
+pyvips
+numpy
+pandas
+pyarrow
+scikit-learn            # RQ3 predictor
+matplotlib
+httpx                    # async client in loadgen
+# nvidia-dali-cuda120    # SUT-B GPU decode (install matching CUDA)
+py-spy

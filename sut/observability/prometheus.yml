@@ -1,0 +1,10 @@
+global:
+  scrape_interval: 2s          # tight so the dashboard feels live
+  evaluation_interval: 2s
+
+scrape_configs:
+  - job_name: 'sut-a'
+    static_configs:
+      # host.docker.internal = the machine running docker (host uvicorn on :8099).
+      # On the RunPod pod, if you run the server in-compose instead, use its service name.
+      - targets: ['host.docker.internal:8099']

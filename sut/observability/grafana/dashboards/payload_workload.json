@@ -1,0 +1,90 @@
+{
+  "uid": "payload-workload",
+  "title": "Payload Is the Workload — SUT-A",
+  "tags": ["payload-workload", "sut-a"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "5s",
+  "time": { "from": "now-15m", "to": "now" },
+  "templating": { "list": [] },
+  "annotations": { "list": [] },
+  "panels": [
+    {
+      "id": 1,
+      "type": "timeseries",
+      "title": "Request rate (offered, RPS)",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "pw-prom" },
+      "fieldConfig": { "defaults": { "unit": "reqps", "custom": { "drawStyle": "line", "fillOpacity": 12, "lineWidth": 2 } }, "overrides": [] },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "targets": [
+        { "refId": "A", "datasource": { "type": "prometheus", "uid": "pw-prom" }, "expr": "sum(rate(pw_requests_total{path=~\"/predict.*\"}[30s]))", "legendFormat": "served/s" }
+      ]
+    },
+    {
+      "id": 2,
+      "type": "timeseries",
+      "title": "End-to-end latency (p50 / p90 / p99)",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "pw-prom" },
+      "fieldConfig": { "defaults": { "unit": "s", "custom": { "drawStyle": "line", "fillOpacity": 8, "lineWidth": 2 }, "thresholds": { "mode": "absolute", "steps": [ { "color": "green", "value": null }, { "color": "red", "value": 0.15 } ] } }, "overrides": [] },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "targets": [
+        { "refId": "A", "datasource": { "type": "prometheus", "uid": "pw-prom" }, "expr": "histogram_quantile(0.50, sum by (le) (rate(pw_request_duration_seconds_bucket{path=~\"/predict.*\"}[30s])))", "legendFormat": "p50" },
+        { "refId": "B", "datasource": { "type": "prometheus", "uid": "pw-prom" }, "expr": "histogram_quantile(0.90, sum by (le) (rate(pw_request_duration_seconds_bucket{path=~\"/predict.*\"}[30s])))", "legendFormat": "p90" },
+        { "refId": "C", "datasource": { "type": "prometheus", "uid": "pw-prom" }, "expr": "histogram_quantile(0.99, sum by (le) (rate(pw_request_duration_seconds_bucket{path=~\"/predict.*\"}[30s])))", "legendFormat": "p99" }
+      ]
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "In-flight (queue-depth proxy)",
+      "gridPos": { "h": 8, "w": 6, "x": 0, "y": 8 },
+      "datasource": { "type": "prometheus", "uid": "pw-prom" },
+      "fieldConfig": { "defaults": { "unit": "short", "color": { "mode": "thresholds" }, "thresholds": { "mode": "absolute", "steps": [ { "color": "green", "value": null }, { "color": "yellow", "value": 20 }, { "color": "red", "value": 80 } ] } }, "overrides": [] },
+      "options": { "colorMode": "value", "graphMode": "area", "reduceOptions": { "calcs": ["lastNotNull"] } },
+      "targets": [
+        { "refId": "A", "datasource": { "type": "prometheus", "uid": "pw-prom" }, "expr": "pw_inflight", "legendFormat": "in-flight" }
+      ]
+    },
+    {
+      "id": 4,
+      "type": "stat",
+      "title": "Goodput @150ms SLO",
+      "gridPos": { "h": 8, "w": 6, "x": 6, "y": 8 },
+      "datasource": { "type": "prometheus", "uid": "pw-prom" },
+      "fieldConfig": { "defaults": { "unit": "percent", "min": 0, "max": 100, "color": { "mode": "thresholds" }, "thresholds": { "mode": "absolute", "steps": [ { "color": "red", "value": null }, { "color": "yellow", "value": 80 }, { "color": "green", "value": 95 } ] } }, "overrides": [] },
+      "options": { "colorMode": "background", "graphMode": "none", "reduceOptions": { "calcs": ["lastNotNull"] } },
+      "targets": [
+        { "refId": "A", "datasource": { "type": "prometheus", "uid": "pw-prom" }, "expr": "100 * sum(rate(pw_request_duration_seconds_bucket{le=\"0.15\",path=~\"/predict.*\"}[30s])) / sum(rate(pw_request_duration_seconds_count{path=~\"/predict.*\"}[30s]))", "legendFormat": "goodput %" }
+      ]
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "Payload size — megapixels (p50 / p99)   ← the cost driver",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+      "datasource": { "type": "prometheus", "uid": "pw-prom" },
+      "fieldConfig": { "defaults": { "unit": "none", "custom": { "drawStyle": "line", "fillOpacity": 10, "lineWidth": 2 } }, "overrides": [] },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "targets": [
+        { "refId": "A", "datasource": { "type": "prometheus", "uid": "pw-prom" }, "expr": "histogram_quantile(0.50, sum by (le) (rate(pw_payload_megapixels_bucket[30s])))", "legendFormat": "p50 MP" },
+        { "refId": "B", "datasource": { "type": "prometheus", "uid": "pw-prom" }, "expr": "histogram_quantile(0.99, sum by (le) (rate(pw_payload_megapixels_bucket[30s])))", "legendFormat": "p99 MP" }
+      ]
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "Stage latency p99 — decode vs resize (where the CPU time goes)",
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 16 },
+      "datasource": { "type": "prometheus", "uid": "pw-prom" },
+      "fieldConfig": { "defaults": { "unit": "s", "custom": { "drawStyle": "line", "fillOpacity": 15, "lineWidth": 2, "stacking": { "mode": "normal" } } }, "overrides": [] },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "targets": [
+        { "refId": "A", "datasource": { "type": "prometheus", "uid": "pw-prom" }, "expr": "histogram_quantile(0.99, sum by (le) (rate(pw_decode_seconds_bucket[30s])))", "legendFormat": "decode p99" },
+        { "refId": "B", "datasource": { "type": "prometheus", "uid": "pw-prom" }, "expr": "histogram_quantile(0.99, sum by (le) (rate(pw_resize_seconds_bucket[30s])))", "legendFormat": "resize p99" }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,27 @@
+# python environments
+.venv/
+venv/
+__pycache__/
+*.pyc
+
+# generated data (regenerate from corpus/generate_corpus.py)
+corpus_P/
+corpus_H/
+
+# experiment outputs
+results/*
+!results/.gitkeep
+*.parquet
+
+# os
+.DS_Store
+
+# personal / learning notes — never in the public repo (kept locally only)
+LAB_NOTES.md
+LEARNINGS.md
+challenges/
+lesson_*.html
+# future personal/coaching notes -> put them in these (gitignored):
+private/
+notes/
+*.private.md
