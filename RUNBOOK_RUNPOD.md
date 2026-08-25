@@ -69,20 +69,26 @@ core-pinning, and clean Docker, not for the GPU.
 
 Assume a pod with >= 9 vCPU (cores 0-8). Adjust core ranges to your pod.
 
-    # 1. clone + install
+    # 1. clone + install (skip the venv on a throwaway pod — base python already has pip;
+    #    a container's `python -m venv` often ships WITHOUT pip, which just wastes time)
     git clone git@github.com:var1914/image-serving-bench.git && cd image-serving-bench
-    python -m venv .venv && .venv/bin/pip install -r requirements.txt
+    python3 -m pip install -r requirements.txt
+    #   (if pip itself is missing: apt-get update && apt-get install -y python3-pip)
     apt-get update && apt-get install -y util-linux htop      # taskset + htop
 
     # 2. server pinned to cores 0-6 (7 cores)
-    taskset -c 0-6 .venv/bin/python -m uvicorn sut.fastapi_naive.server:app \
+    taskset -c 0-6 python3 -m uvicorn sut.fastapi_naive.server:app \
         --host 0.0.0.0 --port 8099 --log-level warning &
+    curl -s localhost:8099/healthz       # sanity: -> {"ok":true,...}
 
-    # 3. (optional) live dashboards — Docker is clean on the pod
-    (cd sut/observability && docker compose up -d)   # Grafana :3000, Prometheus :9090
+    # 3. live metrics — NO Docker needed (the pod is itself a container, so
+    #    docker-in-docker for Grafana is painful; use the terminal dashboard instead)
+    python3 harness/metrics_watch.py     # req/s, in-flight, p50/p99, mean MP — live
+    #   in another shell:  htop          # CPU per core (server 0-6 busy, client 7-8)
+    #   (only if your pod actually supports Docker: cd sut/observability && docker compose up -d)
 
     # 4. experiment pinned to cores 7-8, warmup on, utilization proxy on
-    taskset -c 7-8 .venv/bin/python harness/convoy_experiment.py \
+    taskset -c 7-8 python3 harness/convoy_experiment.py \
         --rps 700 --duration 90 --warmup 20 --server-cores 7 \
         --max-conns 512 --out results/convoy
 
