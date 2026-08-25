@@ -49,3 +49,50 @@ Reproduce the whole suite on a single GPU pod. Times/prices are order-of-magnitu
 
 ## 9. Pull results back
     tar czf results.tgz results/ && <download or push>   # then plot locally in analysis/
+
+## 10. Convoy-tax run with CPU core pinning (clean tail measurement)
+
+Goal: measure whether payload-size *variance* inflates the tail at constant average
+load, and whether the server tracks the queueing-theory (Kingman) prediction.
+
+Why pinning: the load generator must not compete with the server for CPU, or it
+falls behind schedule and the tail latency is understated (coordinated omission).
+Linux `taskset` isolates them onto different cores. This experiment is CPU-bound
+(image decode) and does **not** use the GPU — the pod is chosen for its cores,
+core-pinning, and clean Docker, not for the GPU.
+
+Assume a pod with >= 9 vCPU (cores 0-8). Adjust core ranges to your pod.
+
+    # 1. clone + install
+    git clone git@github.com:var1914/image-serving-bench.git && cd image-serving-bench
+    python -m venv .venv && .venv/bin/pip install -r requirements.txt
+    apt-get update && apt-get install -y util-linux htop      # taskset + htop
+
+    # 2. server pinned to cores 0-6 (7 cores)
+    taskset -c 0-6 .venv/bin/python -m uvicorn sut.fastapi_naive.server:app \
+        --host 0.0.0.0 --port 8099 --log-level warning &
+
+    # 3. (optional) live dashboards — Docker is clean on the pod
+    (cd sut/observability && docker compose up -d)   # Grafana :3000, Prometheus :9090
+
+    # 4. experiment pinned to cores 7-8, warmup on, utilization proxy on
+    taskset -c 7-8 .venv/bin/python harness/convoy_experiment.py \
+        --rps 700 --duration 90 --warmup 20 --server-cores 7 \
+        --max-conns 512 --out results/convoy
+
+### Tuning the load (the one ops knob)
+The script prints an `operating point: ... rho X.XX [OK|TOO LOW|TOO HIGH]` line.
+Adjust `--rps` until `rho` is ~0.7-0.9 **and** C0 goodput stays ~100%:
+- capacity ~= server_cores / (service_ms/1000); with ~7.3 ms/req on 7 cores that is
+  ~960 req/s, so rho 0.8 is around 700-780 rps. Real per-request time on the pod may
+  differ, so trust the printed rho and htop over the arithmetic.
+- Cross-check in a second terminal: `htop` (cores 0-6 busy ~70-90%, cores 7-8 carry
+  the client), plus the Grafana p99 + payload-megapixels panels.
+
+### Reading the result
+- Each row prints measured tax vs Kingman, plus `achieved/offered rps` and `om_p99`.
+- The footer prints a trustworthiness gate: `rho in band?` and `omission low?`.
+  If any row shows high `om_p99` (generator fell behind) or rho is out of band, the
+  numbers are not trustworthy — retune `--rps` / raise `--max-conns` and rerun.
+- Full data in `results/convoy/convoy_results.json`. Pull it back:
+      tar czf convoy.tgz results/convoy && <download>

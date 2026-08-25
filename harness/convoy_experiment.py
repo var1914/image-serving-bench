@@ -12,8 +12,9 @@ Poisson arrivals Ca^2 = 1, so predicted relative tail-inflation vs the zero-vari
 condition is (1 + Cs^2). We compare MEASURED p99 tax to that prediction. Divergence
 is the finding.
 
-Runs all conditions back-to-back and prints the comparison table.
-Usage: .venv/bin/python harness/convoy_experiment.py --rps 60 --duration 90
+Runs a discarded warmup, then all conditions back-to-back, and prints the comparison
+table plus a utilization (rho) proxy and a coordinated-omission trustworthiness gate.
+Usage: python harness/convoy_experiment.py --rps 700 --duration 90 --warmup 20 --server-cores 7
 """
 from __future__ import annotations
 import argparse, asyncio, io, json, os, statistics, time
@@ -101,6 +102,26 @@ async def main_async(a):
     cache = {mp: gen_image(mp) for mp in uniq}
     os.makedirs(a.out, exist_ok=True)
 
+    # --- operating point (utilization proxy) -----------------------------------
+    # Every condition has mean 3.0 MP, so offered load is the same for all of them.
+    # rho ~= (work offered per second) / (server capacity). work/s = rps x mean
+    # service time; capacity = server_cores x 1000 ms/s. Aim for rho in 0.7-0.9:
+    # high enough that a queue forms (so variance can bite), low enough that C0
+    # isn't already melting down.
+    svc_ms = service_ms(3.0)
+    rho = a.rps * svc_ms / (a.server_cores * 1000)
+    band = "OK" if 0.6 <= rho <= 0.92 else ("TOO LOW - raise --rps" if rho < 0.6 else "TOO HIGH - lower --rps")
+    print(f"operating point: {a.rps:g} rps x {svc_ms:.1f} ms/req / {a.server_cores} cores "
+          f"~= rho {rho:.2f}  [{band}]  (want 0.7-0.9)")
+
+    # --- warmup (discarded) — keeps the cold-start tax out of C0 ----------------
+    if a.warmup > 0:
+        print(f"warmup: {a.warmup:g}s of discarded load (thread pool / allocator / decode paths)...")
+        warm_imgs = list(cache.values()); warm_mps = list(cache.keys())
+        async with httpx.AsyncClient(limits=httpx.Limits(max_connections=a.max_conns + 8)) as client:
+            await run_condition(client, a.target, warm_imgs, warm_mps, [1] * len(warm_imgs),
+                                a.rps, a.warmup, a.max_conns, rng)   # rows discarded
+
     results = []
     for name, dist in CONDITIONS:
         mps = [mp for mp, _ in dist]; ws = [w for _, w in dist]
@@ -113,11 +134,14 @@ async def main_async(a):
         lat = [r[0] * 1e3 for r in rows if r[2] == 200]
         om  = [r[1] * 1e3 for r in rows]
         good = sum(1 for x in lat if x <= a.slo_ms) / max(1, len(rows)) * 100
+        achieved_rps = len(rows) / a.duration
         results.append({"name": name, "n": len(rows), "mean_mp": mean_mp,
-                        "cs2": cs2(mps, ws), "mp_per_s": mean_mp * a.rps,
+                        "cs2": cs2(mps, ws), "mp_per_s": mean_mp * a.rps, "rho": rho,
+                        "achieved_rps": achieved_rps,
                         "p50": pct(lat, 50), "p99": pct(lat, 99), "p999": pct(lat, 99.9),
                         "goodput": good, "omission_p99": pct(om, 99)})
-        print(f"    p99={results[-1]['p99']:.0f}ms  goodput={good:.1f}%  omission_p99={pct(om,99):.0f}ms")
+        print(f"    p99={results[-1]['p99']:.0f}ms  goodput={good:.1f}%  "
+              f"achieved={achieved_rps:.0f}/{a.rps:g} rps  omission_p99={pct(om,99):.0f}ms")
         if a.settle:
             await asyncio.sleep(a.settle)
 
@@ -137,6 +161,11 @@ async def main_async(a):
     print("  meas ~ Kingman  => it obeys queueing theory; variance is the whole story.")
     print("  meas < Kingman  => decode's GIL release overlaps work better than M/M/c assumes.")
     print("  (check om_p99 is small in every row, else the generator fell behind -> rerun.)")
+    bad_om = [r["name"] for r in results if r["omission_p99"] > 50]
+    print(f"\n  operating rho ~= {rho:.2f}  ({'in band' if 0.6 <= rho <= 0.92 else 'OUT OF BAND - retune --rps'}).")
+    print("  OK: omission low across all conditions -> tail numbers are trustworthy."
+          if not bad_om else
+          f"  WARN: high omission in {bad_om} -> those rows are contaminated; retune and rerun.")
     with open(os.path.join(a.out, "convoy_results.json"), "w") as fh:
         json.dump(results, fh, indent=2)
     print(f"\n  saved -> {a.out}/convoy_results.json")
@@ -151,6 +180,10 @@ def main():
     ap.add_argument("--max-conns", type=int, default=256)
     ap.add_argument("--slo-ms", type=float, default=150)
     ap.add_argument("--out", default="results/convoy")
+    ap.add_argument("--warmup", type=float, default=20,
+                    help="seconds of discarded warmup load before C0 (avoids cold-start bias)")
+    ap.add_argument("--server-cores", type=int, default=7,
+                    help="cores the server is pinned to (taskset) — used for the rho utilization proxy")
     asyncio.run(main_async(ap.parse_args()))
 
 
