@@ -2,6 +2,12 @@
 
 Reproduce the whole suite on a single GPU pod. Times/prices are order-of-magnitude.
 
+> **Which path to run:** for the **convoy-tax experiment (the current, tested one),
+> follow §10 below** — it is self-contained and uses port **8099**. Sections 1–9 are
+> the broader plan for later experiments (corpus generation, RQ1/RQ2/RQ5); some of
+> their commands are placeholders with example values and are not runnable yet. When
+> §1–9 and §10 disagree, **§10 wins**.
+
 ## 1. Pick the pod
 - **Primary:** A40 48 GB, ~9 vCPU, 50 GB RAM, ~$0.4–0.8/hr. CPU-lean on purpose.
 - **Container:** `runpod/pytorch:2.x-cuda12.x` (has CUDA + torch).
@@ -41,7 +47,7 @@ Reproduce the whole suite on a single GPU pod. Times/prices are order-of-magnitu
 ## 7. Watch it break (second terminal)
     nvidia-smi dmon -s u              # GPU SM% — watch it idle while queue grows (RQ2)
     py-spy top --pid <server pid>     # where CPU time goes (decode/resize dominate)
-    watch -n1 'ss -tan | grep :8000 | wc -l'   # in-flight / queue proxy
+    watch -n1 'ss -tan | grep :8099 | wc -l'   # in-flight / queue proxy
 
 ## 8. Cost hygiene
 - Stop the pod between sessions; keep the volume. Log GPU-hours in results/COST_LOG.md.
