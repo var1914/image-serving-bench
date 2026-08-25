@@ -1,17 +1,16 @@
-# Pin exact versions on first successful run; these are the deps, not a lockfile.
-torch
-torchvision
+# Core dependencies — server (SUT-A), load harness, convoy experiment, /metrics.
+# A fresh `pip install -r requirements.txt` installs exactly these and nothing heavy.
 fastapi
 uvicorn[standard]
 pillow
-# pillow-simd            # install in place of pillow on the pod for the SIMD backend
-opencv-python-headless
-pyvips
 numpy
-pandas
-pyarrow
-scikit-learn            # RQ3 predictor
-matplotlib
-httpx                    # async client in loadgen
-# nvidia-dali-cuda120    # SUT-B GPU decode (install matching CUDA)
-py-spy
+httpx
+prometheus_client
+
+# --- optional, install only when a later experiment needs it ------------------
+# diagnostics:            pip install py-spy
+# RQ3 predictor / plots:  pip install scikit-learn matplotlib pandas pyarrow
+# RQ5 decoder divergence: pip install opencv-python-headless pyvips torchvision torch
+#                         (pyvips also needs the system lib: apt-get install -y libvips)
+# SUT-B GPU decode:       pip install nvidia-dali-cuda120   (match your CUDA version)
+# pillow-simd: faster drop-in for pillow (SIMD); build on the pod if you want it.
