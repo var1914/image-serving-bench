@@ -19,6 +19,7 @@ results/*
 # personal / learning notes — never in the public repo (kept locally only)
 LAB_NOTES.md
 LEARNINGS.md
+Notes.md
 challenges/
 lesson_*.html
 # future personal/coaching notes -> put them in these (gitignored):
