@@ -1,5 +1,40 @@
 # Experiment Plan — The Payload Is the Workload
 
+## Positioning (updated after a prior-art check)
+
+Honest scoping: some early framings here are already published and are treated as
+**baselines**, not contributions.
+
+- **Preprocessing dominates serving latency** — TAKEN by
+  [Beyond Inference, DAC 2024](https://arxiv.org/abs/2403.12981) (up to 97% for
+  large images; CPU:GPU sizing; multi-GPU stall). RQ1 (dispersion) and the
+  CPU:GPU-sizing artifact are *confirmation of a known result*, not new.
+- **Open-loop / coordinated-omission-safe load** — TAKEN by
+  [MLPerf LoadGen](https://arxiv.org/pdf/1911.02549). Our generator follows it.
+- **Variance/size heterogeneity inflates the tail (direction)** — TAKEN by
+  [Size-aware Sharding, NSDI'19](https://www.usenix.org/conference/nsdi19/presentation/didona)
+  (HOL blocking in KV stores). "Does variance hurt the tail?" is not a question.
+- **Energy-latency DoS on the model** — TAKEN by
+  [Sponge Examples, EuroS&P 2021](https://arxiv.org/abs/2006.03463) (fixed input
+  size; attacks the model, not the decoder).
+
+Defensible contributions the experiments below now serve (pending a full venue sweep):
+
+- **C1 (headline) — header-only cost signal for autoscaling.** Predict per-request
+  cost from header bytes (no decode); scale/admit on megapixels/s; hold SLO through
+  a payload-mix shift where CPU%- / util-based scaling fails. *(was RQ3.)*
+- **C2 (mechanism) — deviation from queueing theory.** How far a real Python
+  (GIL + event loop + thread pool) image server departs from Kingman's G/G/1 tail
+  bound under heterogeneous, open-loop payloads — the *deviation*, not the
+  direction. *(was RQ2 + the convoy experiment.)*
+- **C3 (supporting) — decode-stage cost amplification** (before the resize) and the
+  fact that util-based autoscalers amplify rather than absorb it. *(was RQ4.)*
+
+Read the RQ1–RQ5 sections below through the C1/C2/C3 lens; RQ1 and RQ5 are demoted
+to confirmation/appendix.
+
+---
+
 Goal: a benchmark/stress-suite that **provably breaks** production image-serving
 assumptions under input heterogeneity, at scale, on a real GPU. Every experiment
 has a stated hypothesis, a defined "break" (the failure we force into the open),

@@ -1,77 +1,90 @@
 # The Payload Is the Workload
 
-**Benchmarking image-inference platforms under input heterogeneity.**
+**Cost-aware serving for image inference under input heterogeneity.**
 
-A vision service's per-request cost is set almost entirely by properties of the
-*incoming bytes* — resolution, format, chroma subsampling, progressive encoding,
-ICC profile — not by the model. Yet every control-plane layer (autoscaler
-metrics, batchers, admission control, capacity models, and MLPerf Inference
-itself) treats requests as interchangeable. This project measures how wrong that
-assumption is, and shows the cheap fixes.
+In a vision API, per-request cost is dominated by the *payload* — megapixels,
+format, chroma subsampling — not by the model. That preprocessing dominates
+serving latency is already established ([AbouElhamayed et al., DAC 2024](https://arxiv.org/abs/2403.12981)).
+This project asks the next question: **when the payload *mix* shifts, the control
+plane is blind to it — and what cheap signal fixes that?**
 
-MLPerf hands us the opening: its rules make approved preprocessing **untimed** —
-the industry-standard benchmark measures a world where JPEGs arrive
-pre-decoded. Real services get bytes over HTTP.
+Autoscalers (on CPU% / GPU-utilization / RPS), count-based batchers, and capacity
+models all treat requests as interchangeable. Under a payload-mix shift those
+signals stay flat while the tail catches fire. We measure that failure and test a
+fix: a **header-only cost signal** — width×height read from the image header in
+microseconds, *no decode* — used to drive autoscaling and admission.
 
-## Research questions
+## What this is (and isn't)
+- **Is:** an open harness + experiments on *heterogeneous, open-loop* image
+  payloads, and a cheap input-derived cost signal for the control plane.
+- **Isn't:** a rediscovery that preprocessing is expensive (that's the baseline
+  below), nor a new load generator (MLPerf LoadGen already does open-loop Poisson).
 
-- **RQ1 — Dispersion.** Fixed model, realistic image population: how large is the
-  per-request cost spread from payload alone? (Metric: CDR = p99 cost / p50 cost,
-  stage-decomposed.) Claim: >10×, larger than swapping the model.
-- **RQ2 — Control-plane blindness.** Same RPS, different payload *mix* into an
-  HPA/KEDA deployment: do CPU% / RPS signals stay flat while p99 catches fire?
-  Which scaling signal actually tracks cost?
-- **RQ3 — Header-only cost prediction.** JPEG SOF / PNG IHDR / WebP VP8X give
-  width×height in ~µs with no decode. Can (bytes, pixels, format, progressive)
-  predict cost well enough to drive a shape-aware autoscaler, admission
-  controller, and shape-partitioned pool?
-- **RQ4 — Hostile-but-valid payloads.** Pixel bombs, multi-scan progressive
-  JPEG, animated WebP, CMYK+ICC, 16-bit PNG, truncated streams. (Metric: LAF =
-  latency amplification factor.) A 40 KB file that costs like 40 MB. Price each
-  defense. *Defensive framing: hardening your own endpoint.*
-- **RQ5 — Decoder divergence.** Same image through Pillow / Pillow-SIMD /
-  OpenCV / torchvision / libvips / nvJPEG: top-1 flip rate. An infra choice that
-  produces a correctness bug.
+## Contributions under test
+- **C1 (headline) — Header-only cost signal for autoscaling.** Parse
+  width×height/format from header bytes (no decode); predict per-request CPU cost;
+  scale/admit on megapixels-per-second. Claim: holds SLO through a payload-mix
+  shift where CPU%- / utilization-based scaling fails.
+- **C2 (mechanism) — Deviation from queueing theory.** At equal mean load, how
+  much does payload-size *variance* inflate the tail in a real Python stack
+  (GIL + event loop + thread pool), and does Kingman's G/G/1 bound predict it?
+  The *deviation* — not the direction — is the result.
+- **C3 (supporting) — Decode-stage cost amplification.** A valid image with a
+  huge pixel count in tiny bytes hits the *decoder* (before the fixed-size resize);
+  we report the latency-amplification factor and show utilization-based autoscalers
+  *amplify* rather than absorb it.
 
-## Deliverables (what a company can use the same afternoon)
-
-1. An open load-harness they point at their own endpoint.
-2. A CPU:GPU sizing formula for image serving.
-3. A specific autoscaler metric to switch to (megapixels/s, not CPU%/RPS).
-4. A hostile-payload hardening checklist with per-defense cost.
-
-## Layout
-
-    EXPERIMENT_PLAN.md   the plan — start here
-    RUNBOOK_RUNPOD.md    step-by-step to reproduce on a RunPod GPU pod
-    corpus/              payload population + hostile-payload generators
-    sut/                 systems under test (fastapi_naive, triton)
-    harness/             open-loop load generator + metrics collection
-    analysis/            metric definitions + plotting
-    results/             raw runs (gitignored except .gitkeep)
+## Related work / positioning
+- **[Beyond Inference (AbouElhamayed et al., DAC 2024)](https://arxiv.org/abs/2403.12981)** —
+  preprocessing dominates DNN-serving latency; homogeneous payloads, closed-loop.
+  *Our baseline.* We move to heterogeneous payloads + open-loop arrivals and add a
+  control-plane fix.
+- **[MLPerf LoadGen (arXiv:1911.02549)](https://arxiv.org/pdf/1911.02549)** — the
+  Poisson, open-loop, coordinated-omission-safe generator. *We follow its
+  methodology*; our generator is a lightweight stand-in for local runs.
+- **[Size-aware Sharding (Didona & Zwaenepoel, NSDI'19)](https://www.usenix.org/conference/nsdi19/presentation/didona)** —
+  request-size heterogeneity causes head-of-line blocking / tail inflation in
+  key-value stores. *Different substrate* (image decode + Python/GIL); we add a
+  header-derived predictor as the control signal, not just size-aware routing.
+- **[Sponge Examples (Shumailov et al., EuroS&P 2021)](https://arxiv.org/abs/2006.03463)** —
+  energy-latency DoS on the *model* at fixed input size. *We target the decode
+  stage before resize* and frame it as measurement, not a new attack.
 
 ## Quickstart
 
 ```bash
-# 1. install (Python 3.11+)
-python -m venv .venv && .venv/bin/pip install -r requirements.txt
+# install (Python 3.11+); on a throwaway box you can skip the venv and use base python
+python3 -m pip install -r requirements.txt
 
-# 2. start the server under test (SUT-A)
-.venv/bin/python -m uvicorn sut.fastapi_naive.server:app --host 0.0.0.0 --port 8099
+# start the server under test (SUT-A: FastAPI + Prometheus /metrics)
+python3 -m uvicorn sut.fastapi_naive.server:app --host 0.0.0.0 --port 8099
 
-# 3. drive open-loop load against it
-.venv/bin/python harness/loadgen.py --rps 40 --duration 60
+# drive open-loop load against it
+python3 harness/loadgen.py --rps 40 --duration 60
 
-# 4. run the convoy-tax experiment (payload variance vs tail latency)
-.venv/bin/python harness/convoy_experiment.py --rps 60 --duration 90
+# the convoy experiment: payload variance vs tail latency, measured vs Kingman
+python3 harness/convoy_experiment.py --rps 700 --duration 90 --warmup 20 --server-cores 7
 
-# 5. (optional) live dashboards — Prometheus :9090, Grafana :3000 (auto-provisioned)
-cd sut/observability && docker compose up -d
+# live metrics in the terminal — no Docker needed
+python3 harness/metrics_watch.py
 ```
 
 Metric definitions (CDR, LAF, goodput@SLO, the coordinated-omission check) are in
-`analysis/metrics_defs.md`. See `RUNBOOK_RUNPOD.md` to reproduce at scale on a GPU pod.
+`analysis/metrics_defs.md`. `RUNBOOK_RUNPOD.md` §10 has the core-pinned setup for a
+clean tail measurement on a GPU pod.
+
+## Layout
+
+    EXPERIMENT_PLAN.md   design + positioning
+    RUNBOOK_RUNPOD.md    reproduce on a GPU pod (see §10 for the pinned convoy run)
+    sut/                 system under test (fastapi_naive) + observability stack
+    harness/             open-loop load generator, convoy experiment, metrics watcher
+    corpus/              header probe + payload generators
+    analysis/            metric definitions + mechanism demos
+    results/             raw runs (gitignored except .gitkeep)
 
 ## Status
 
-Active research. Target venue: EuroMLSys / MLSys workshop (6-page), arXiv preprint.
+Active research; scope is being pressure-tested against the prior work above.
+Target: EuroMLSys / MLSys workshop (6-page) + arXiv — contingent on a wedge that
+survives a full related-work sweep.
