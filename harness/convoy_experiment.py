@@ -92,6 +92,25 @@ async def run_condition(client, target, imgs, mps, ws, rps, duration, max_conns,
     return rows
 
 
+async def calibrate_service_ms(target, body, n=20):
+    """Measure the REAL per-request decode+resize time on THIS server (read from its
+    JSON response), so capacity/rho reflect the pod, not the dev laptop. Median of n."""
+    times = []
+    async with httpx.AsyncClient() as c:
+        for _ in range(3):                                   # warm a few first
+            try:
+                await c.post(target, content=body, timeout=60)
+            except Exception:
+                pass
+        for _ in range(n):
+            try:
+                j = (await c.post(target, content=body, timeout=60)).json()
+                times.append(float(j.get("decode_ms", 0)) + float(j.get("resize_ms", 0)))
+            except Exception:
+                pass
+    return sorted(times)[len(times) // 2] if times else 0.0
+
+
 async def measure(a, cache, rng, rho, name, dist):
     """Run one condition end-to-end; print and return its result dict."""
     mps = [mp for mp, _ in dist]; ws = [w for _, w in dist]
@@ -123,17 +142,24 @@ async def main_async(a):
     cache = {mp: gen_image(mp) for mp in uniq}
     os.makedirs(a.out, exist_ok=True)
 
-    # --- operating point (utilization proxy) -----------------------------------
-    # Every condition has mean 3.0 MP, so offered load is the same for all of them.
-    # rho ~= (work offered per second) / (server capacity). work/s = rps x mean
-    # service time; capacity = server_cores x 1000 ms/s. Aim for rho in 0.7-0.9:
-    # high enough that a queue forms (so variance can bite), low enough that C0
-    # isn't already melting down.
-    svc_ms = service_ms(3.0)
-    rho = a.rps * svc_ms / (a.server_cores * 1000)
-    band = "OK" if 0.6 <= rho <= 0.92 else ("TOO LOW - raise --rps" if rho < 0.6 else "TOO HIGH - lower --rps")
-    print(f"operating point (modeled): {a.rps:g} rps x {svc_ms:.1f} ms/req / {a.server_cores} cores "
-          f"~= rho {rho:.2f}  [{band}]  (want 0.7-0.9; constants are approximate - confirm with htop)")
+    # --- calibrate on THIS hardware, then guard against overload ---------------
+    # Laptop-measured constants badly mis-estimate pod capacity: they once printed
+    # "rho 0.73 [OK]" for an rps that actually overloaded C0 to p99=24s and OOM'd the
+    # pod. So measure the real per-3MP service time from the server's own response and
+    # ABORT if the requested rps would exceed capacity (unbounded decode backlog -> OOM).
+    svc_ms = await calibrate_service_ms(a.target, cache[3.0])
+    if svc_ms <= 0:
+        svc_ms = service_ms(3.0)                       # fallback to model if calibration failed
+    capacity = a.server_cores * 1000.0 / svc_ms        # req/s the decode path can sustain
+    rho = a.rps / capacity
+    rec = 0.8 * capacity
+    print(f"calibrated: 3 MP service ~= {svc_ms:.1f} ms/req -> capacity ~= {capacity:.0f} rps "
+          f"on {a.server_cores} cores")
+    print(f"operating point: {a.rps:g} rps -> rho ~= {rho:.2f}  (want 0.7-0.9; ~{rec:.0f} rps hits 0.8)")
+    if rho > 0.95 and not a.force:
+        print(f"\nABORT: --rps {a.rps:g} is ~{rho:.1f}x capacity -> this overloads and can OOM the pod "
+              f"(unbounded decode backlog).\n       Rerun with --rps ~{rec:.0f} (rho 0.8), or --force to override.")
+        return
 
     # --- warmup (discarded) — keeps the cold-start tax out of C0 ----------------
     # Warm at the SAME operating point as the conditions (mean 3 MP), NOT an
@@ -212,6 +238,8 @@ def main():
                     help="cores the server is pinned to (taskset) — used for the rho utilization proxy")
     ap.add_argument("--no-recheck", action="store_true",
                     help="skip the C0 re-run at the end (the time-drift sentinel)")
+    ap.add_argument("--force", action="store_true",
+                    help="run even if calibrated rho exceeds ~0.95x capacity (risks OOM)")
     asyncio.run(main_async(ap.parse_args()))
 
 
