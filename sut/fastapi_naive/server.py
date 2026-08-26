@@ -26,12 +26,37 @@ from prometheus_client import Counter, Gauge, Histogram, generate_latest, CONTEN
 
 app = FastAPI(title="SUT-A naive image server")
 
-# Bound the decode thread pool so the server behaves as a clean c=N queue matching the
-# pinned core count. Set PW_DECODE_THREADS=<server cores> (e.g. 7) for the convoy
-# experiment; unset falls back to asyncio's default executor (min(32, cpu+4) threads,
-# which on a big host over-subscribes a few pinned cores and muddies the queueing model).
+def _effective_cores() -> int:
+    """Cores actually available to THIS process, honoring a container CPU quota.
+    In a container os.cpu_count() reports the HOST's cores, so a thread pool sized from
+    it massively over-subscribes a small quota (a likely cause of inflated per-request
+    time). Read the cgroup quota (v2 then v1) and fall back to os.cpu_count()."""
+    import math
+    try:                                                   # cgroup v2
+        with open("/sys/fs/cgroup/cpu.max") as f:
+            quota, period = f.read().split()
+        if quota != "max":
+            return max(1, math.floor(int(quota) / int(period)))
+    except Exception:
+        pass
+    try:                                                   # cgroup v1
+        with open("/sys/fs/cgroup/cpu/cpu.cfs_quota_us") as f:
+            q = int(f.read())
+        with open("/sys/fs/cgroup/cpu/cpu.cfs_period_us") as f:
+            p = int(f.read())
+        if q > 0:
+            return max(1, math.floor(q / p))
+    except Exception:
+        pass
+    return os.cpu_count() or 1
+
+# Bound the decode thread pool to the container's real core budget (or PW_DECODE_THREADS).
+# This keeps the server a clean c=N queue and avoids over-subscribing a small CPU quota.
 _DT = os.environ.get("PW_DECODE_THREADS")
-_DECODE_POOL = ThreadPoolExecutor(max_workers=int(_DT), thread_name_prefix="decode") if _DT else None
+_POOL_SIZE = int(_DT) if _DT else _effective_cores()
+_DECODE_POOL = ThreadPoolExecutor(max_workers=_POOL_SIZE, thread_name_prefix="decode")
+print(f"[SUT-A] decode pool = {_POOL_SIZE} threads "
+      f"(effective cores; os.cpu_count()={os.cpu_count()}, PW_DECODE_THREADS={_DT})", flush=True)
 
 # ---- metrics -----------------------------------------------------------------
 # Histograms bucket observations so Prometheus can compute quantiles (p50/p99)
