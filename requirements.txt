@@ -6,8 +6,11 @@ pillow
 numpy
 httpx
 prometheus_client
+onnxruntime               # SUT-C: real ResNet-50 inference (sut/onnx_server)
 
 # --- optional, install only when a later experiment needs it ------------------
+# model export (once):    pip install torch torchvision onnx onnxscript
+#                         then: python models/export_resnet50.py  (writes a 102 MB .onnx, gitignored)
 # diagnostics:            pip install py-spy
 # RQ3 predictor / plots:  pip install scikit-learn matplotlib pandas pyarrow
 # RQ5 decoder divergence: pip install opencv-python-headless pyvips torchvision torch

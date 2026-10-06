@@ -23,20 +23,37 @@ from PIL import Image
 import numpy as np
 
 
-def make_mix(seed: int = 7):
+def make_mix(seed: int = 7, content: str = "gradient", fixed_mp: float | None = None):
     """~12 images spanning a heavy-tailed megapixel range; weighted toward small,
-    like real user uploads (median ~1 MP, long tail to 24 MP)."""
+    like real user uploads (median ~1 MP, long tail to 24 MP).
+
+    content="gradient": smooth linspace ramp — the cheapest possible content to decode
+                        (kept as the default for comparability with earlier runs).
+    content="photo":    low-res noise upscaled -> blobby, photo-like detail; decodes
+                        ~1.7x slower per MP than a gradient at the same size.
+    fixed_mp:           if set, every request uses one image of that size (isolates
+                        a config comparison from the size mix)."""
     rng = random.Random(seed)
-    specs = [0.3, 0.5, 0.8, 1.0, 1.2, 2.0, 3.0, 5.0, 8.0, 12.0, 18.0, 24.0]
-    weights = [10, 12, 12, 14, 14, 10, 8, 6, 5, 4, 3, 2]     # small dominates
+    nrng = np.random.default_rng(seed)
+    if fixed_mp is not None:
+        specs, weights = [fixed_mp], [1]
+    else:
+        specs = [0.3, 0.5, 0.8, 1.0, 1.2, 2.0, 3.0, 5.0, 8.0, 12.0, 18.0, 24.0]
+        weights = [10, 12, 12, 14, 14, 10, 8, 6, 5, 4, 3, 2]     # small dominates
     imgs = []
     for mp in specs:
         side = int((mp * 1e6) ** 0.5)
-        xr = np.linspace(0, 255, side, dtype="uint8")
-        arr = np.stack([np.broadcast_to(xr, (side, side)),
-                        np.broadcast_to(xr[:, None], (side, side)),
-                        np.broadcast_to(xr, (side, side)) // 2], axis=-1)
-        buf = io.BytesIO(); Image.fromarray(arr, "RGB").save(buf, "JPEG", quality=85)
+        if content == "photo":
+            k = max(8, side // 16)
+            small = nrng.integers(0, 256, (k, k, 3), dtype="uint8")
+            img = Image.fromarray(small, "RGB").resize((side, side), Image.BICUBIC)
+        else:
+            xr = np.linspace(0, 255, side, dtype="uint8")
+            arr = np.stack([np.broadcast_to(xr, (side, side)),
+                            np.broadcast_to(xr[:, None], (side, side)),
+                            np.broadcast_to(xr, (side, side)) // 2], axis=-1)
+            img = Image.fromarray(arr, "RGB")
+        buf = io.BytesIO(); img.save(buf, "JPEG", quality=85)
         imgs.append(buf.getvalue())
     return imgs, weights, specs, rng
 
@@ -88,7 +105,7 @@ async def run(a):
     root = a.target.rsplit("/", 1)[0]
     if not await wait_ready(root):
         print("server not reachable; start SUT-A first"); return
-    imgs, weights, specs, rng = make_mix()
+    imgs, weights, specs, rng = make_mix(content=a.content, fixed_mp=a.fixed_mp)
     rows, sem = [], asyncio.Semaphore(a.max_conns)
 
     async def fire(client, body, sched, t0, tgt, mp):
@@ -160,6 +177,10 @@ def main():
                     type=lambda s: tuple(float(x) for x in s.split(":")),
                     help="ramp mean megapixels over --duration, e.g. 1:24")
     ap.add_argument("--mix-mode", choices=["nearest", "window"], default="nearest")
+    ap.add_argument("--content", choices=["gradient", "photo"], default="gradient",
+                    help="image content: smooth gradient (cheap) or photo-like detail")
+    ap.add_argument("--fixed-mp", type=float, default=None,
+                    help="send one image size for every request (e.g. 1.0)")
     asyncio.run(run(ap.parse_args()))
 
 

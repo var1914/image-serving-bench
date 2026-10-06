@@ -114,3 +114,34 @@ Adjust `--rps` until `rho` is ~0.7-0.9 **and** C0 goodput stays ~100%:
   (timeouts are excluded from p99) — lower `--rps`.
 - Full data in `results/convoy/convoy_results.json`. Pull it back:
       tar czf convoy.tgz results/convoy && <download>
+
+## 11. ONNX Runtime threading sweep (blog experiment)
+
+Goal: measure what ONNX Runtime's default thread count costs inside a CPU-quota
+container, against quota-sized and request-level configs. One fixed image size
+(1 MP, photo-like) per run. Server: `sut/onnx_server` (ResNet-50, ONNX Runtime, CPU).
+
+    # 1. deps (+ export deps once; the RunPod PyTorch image may already have torch)
+    python3 -m pip install -r requirements.txt
+    python3 -m pip install onnx onnxscript torchvision   # torch: --index-url https://download.pytorch.org/whl/cpu if missing
+    python3 models/export_resnet50.py                    # writes models/repo/resnet50_onnx/1/model.onnx
+    #    (alternative: export on a laptop and scp the .onnx to the same path)
+
+    # 2. the container's real CPU budget
+    cat /sys/fs/cgroup/cpu.max; nproc
+    python3 -c "import sys; sys.path.insert(0, 'harness'); import cpuinfo; print(cpuinfo.describe())"
+
+    # 3. stage split, no server (threads sized to the container; 'default' row = the trap)
+    taskset -c 0-6 python3 analysis/stage_split.py
+
+    # 4. the sweep: server on quota-1 cores, load generator on the last one (~20-40 min)
+    apt-get install -y util-linux                        # taskset, if missing
+    python3 harness/config_sweep.py --server-cpus 0-6 --client-cpus 7
+
+    # 5. bring results back
+    tar czf sweep.tgz results/sweep    # steps.csv + summary.json
+
+Reading it: each config prints, per load step, p50/p99, goodput, the generator's
+omission, the server's OS thread count, and how long the kernel throttled the
+container (`cpu.stat`). The summary shows the highest load each config held with
+goodput >= 95%. Throttling counts the whole container, client included.

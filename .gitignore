@@ -27,3 +27,6 @@ lesson_*.html
 private/
 notes/
 *.private.md
+
+# model weights (regenerate with models/export_resnet50.py)
+*.onnx
