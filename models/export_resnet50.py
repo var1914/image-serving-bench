@@ -4,12 +4,15 @@
 What this teaches (ONNX rung A1-A3):
 - ONNX is a *graph* (operators + weights) frozen out of PyTorch, so any runtime
   (ONNX Runtime, TensorRT, Triton) can execute it without Python/PyTorch.
-- opset = the version of the operator vocabulary the graph is written in.
+- opset = the version of the operator vocabulary the graph is written in. The
+  torch.export-based ("dynamo") exporter starts at opset 18.
 - dynamic batch axis: we mark dim 0 as variable ("batch"), otherwise the graph is
-  hard-wired to batch=1 and Triton's dynamic batcher could never group requests.
+  hard-wired to one batch size and Triton's dynamic batcher could never group requests.
+  torch.export treats a size-1 example dim as a constant, so the example batch is 2.
 - We verify the export: same input -> PyTorch vs ONNX Runtime, compare outputs.
 
-Output: models/repo/resnet50_onnx/1/model.onnx
+Needs torch >= 2.6 (dynamo exporter with dynamic_shapes and external_data).
+Output: models/repo/resnet50_onnx/1/model.onnx (one self-contained file, ~102 MB)
 """
 import os, time
 import numpy as np
@@ -20,17 +23,16 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 OUT = os.path.join(HERE, "repo", "resnet50_onnx", "1", "model.onnx")
 
 def main():
+    os.makedirs(os.path.dirname(OUT), exist_ok=True)       # the exporter won't create it
     weights = torchvision.models.ResNet50_Weights.DEFAULT
     model = torchvision.models.resnet50(weights=weights).eval()
-    dummy = torch.randn(1, 3, 224, 224)
+    example = torch.randn(2, 3, 224, 224)                  # batch 2: a size-1 dim gets baked in
 
     t = time.perf_counter()
-    kw = dict(input_names=["input"], output_names=["logits"], opset_version=17,
-              dynamic_axes={"input": {0: "batch"}, "logits": {0: "batch"}})
-    try:                                   # classic TorchScript-based exporter
-        torch.onnx.export(model, dummy, OUT, dynamo=True, **kw)
-    except TypeError:                      # older torch without the dynamo flag
-        torch.onnx.export(model, dummy, OUT, **kw)
+    torch.onnx.export(model, (example,), OUT, dynamo=True, opset_version=18,
+                      input_names=["input"], output_names=["logits"],
+                      dynamic_shapes=({0: torch.export.Dim("batch")},),
+                      external_data=False)                 # weights inside model.onnx, no .data sidecar
     print(f"exported in {time.perf_counter()-t:.1f}s -> {OUT}  ({os.path.getsize(OUT)/1e6:.0f} MB)")
 
     m = onnx.load(OUT)
@@ -39,14 +41,16 @@ def main():
     dims = [d.dim_param or d.dim_value for d in inp.type.tensor_type.shape.dim]
     print(f"graph: {len(m.graph.node)} nodes, opset {m.opset_import[0].version}, input {inp.name} {dims}")
 
-    # verify: PyTorch vs ONNX Runtime on the same batch of 4 (also proves batch is dynamic)
-    x = torch.randn(4, 3, 224, 224)
-    with torch.no_grad():
-        ref = model(x).numpy()
+    # verify: PyTorch vs ONNX Runtime at batch 1 and 4 (neither is the example size,
+    # so this also proves the batch axis is really dynamic)
     sess = ort.InferenceSession(OUT, providers=["CPUExecutionProvider"])
-    got = sess.run(None, {"input": x.numpy()})[0]
-    print(f"verify batch=4: max |torch - ort| = {np.abs(ref-got).max():.2e}  "
-          f"top-1 agree: {(ref.argmax(1)==got.argmax(1)).all()}")
+    for bs in (1, 4):
+        x = torch.randn(bs, 3, 224, 224)
+        with torch.no_grad():
+            ref = model(x).numpy()
+        got = sess.run(None, {"input": x.numpy()})[0]
+        print(f"verify batch={bs}: max |torch - ort| = {np.abs(ref-got).max():.2e}  "
+              f"top-1 agree: {(ref.argmax(1)==got.argmax(1)).all()}")
 
 if __name__ == "__main__":
     main()

@@ -30,3 +30,4 @@ notes/
 
 # model weights (regenerate with models/export_resnet50.py)
 *.onnx
+*.onnx.data
