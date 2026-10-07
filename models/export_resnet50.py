@@ -28,7 +28,7 @@ def main():
     kw = dict(input_names=["input"], output_names=["logits"], opset_version=17,
               dynamic_axes={"input": {0: "batch"}, "logits": {0: "batch"}})
     try:                                   # classic TorchScript-based exporter
-        torch.onnx.export(model, dummy, OUT, dynamo=False, **kw)
+        torch.onnx.export(model, dummy, OUT, dynamo=True, **kw)
     except TypeError:                      # older torch without the dynamo flag
         torch.onnx.export(model, dummy, OUT, **kw)
     print(f"exported in {time.perf_counter()-t:.1f}s -> {OUT}  ({os.path.getsize(OUT)/1e6:.0f} MB)")
